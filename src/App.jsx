@@ -1,113 +1,179 @@
-import { useState, useCallback } from "react";
-import Header from "./components/Header";
-import InputPanel from "./components/InputPanel";
-import StatsGrid from "./components/StatsGrid";
-import HeatmapPanel from "./components/HeatmapPanel";
-import TrendsPanel from "./components/TrendsPanel";
-import RationalBetsPanel from "./components/RationalBetsPanel";
-import EducationPanel from "./components/EducationPanel";
-import DisclaimerBanner from "./components/DisclaimerBanner";
-import { analyzeResults } from "./utils/statistics";
-import { MOCK_DATA } from "./utils/mockData";
+import { useCallback, useMemo, useState } from "react";
+import BalanceBar from "./components/BalanceBar";
+import RouletteWheel from "./components/RouletteWheel";
+import BettingTable from "./components/BettingTable";
+import ChipRack from "./components/ChipRack";
+import BetSummary from "./components/BetSummary";
+import HistoryStrip from "./components/HistoryStrip";
+import WinOverlay from "./components/WinOverlay";
+import { useWallet } from "./hooks/useWallet";
+import { resolveBets, spinRandom, colorOf } from "./utils/roulette";
 
 export default function App() {
-  const [rouletteType, setRouletteType] = useState("european");
-  const [results, setResults] = useState(MOCK_DATA);
-  const [inputValue, setInputValue] = useState("");
-  const [activeTab, setActiveTab] = useState("stats");
+  const { balance, debit, credit, addTopUp, reset, history, pushHistory } = useWallet();
 
-  const stats = analyzeResults(results, rouletteType);
+  const [chip, setChip] = useState(5);
+  const [bets, setBets] = useState([]);              // active bets, not yet committed
+  const [lastBets, setLastBets] = useState([]);      // last committed bets, for "Powtórz"
+  const [spinning, setSpinning] = useState(false);
+  const [winningNumber, setWinningNumber] = useState(null);
+  const [overlay, setOverlay] = useState(null);
+  const [lastNet, setLastNet] = useState(null);
 
-  const handleAddNumber = useCallback(() => {
-    const nums = inputValue
-      .split(/[\s,;]+/)
-      .map((n) => parseInt(n.trim(), 10))
-      .filter((n) => {
-        const max = rouletteType === "american" ? 38 : 37;
-        return !isNaN(n) && n >= 0 && n < max;
-      });
-    if (nums.length > 0) {
-      setResults((prev) => [...prev, ...nums]);
-      setInputValue("");
+  const totalStake = useMemo(
+    () => bets.reduce((s, b) => s + b.amount, 0),
+    [bets]
+  );
+
+  const placeBet = useCallback((kind, number) => {
+    if (spinning) return;
+    if (chip > balance - totalStake) {
+      // Not enough free balance for this chip
+      return;
     }
-  }, [inputValue, rouletteType]);
+    setBets((prev) => [...prev, { kind, number, amount: chip }]);
+  }, [chip, balance, totalStake, spinning]);
 
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter") handleAddNumber();
-  };
+  const clearBetAt = useCallback((kind, number) => {
+    if (spinning) return;
+    setBets((prev) => {
+      // Remove the LAST bet matching this location
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const b = prev[i];
+        const matches = b.kind === kind && (number === undefined || b.number === number);
+        if (matches) {
+          return [...prev.slice(0, i), ...prev.slice(i + 1)];
+        }
+      }
+      return prev;
+    });
+  }, [spinning]);
 
-  const handleClear = () => setResults([]);
-  const handleLoadMock = () => setResults(MOCK_DATA);
+  const undo = useCallback(() => {
+    if (spinning) return;
+    setBets((prev) => prev.slice(0, -1));
+  }, [spinning]);
 
-  const tabs = [
-    { id: "stats", label: "Statystyki" },
-    { id: "heatmap", label: "Heatmapa" },
-    { id: "trends", label: "Trendy" },
-    { id: "bets", label: "Analiza Zakładów" },
-    { id: "education", label: "Edukacja" },
-  ];
+  const clearAll = useCallback(() => {
+    if (spinning) return;
+    setBets([]);
+  }, [spinning]);
+
+  const rebet = useCallback(() => {
+    if (spinning) return;
+    if (lastBets.length === 0) return;
+    const total = lastBets.reduce((s, b) => s + b.amount, 0);
+    if (total > balance) return;
+    setBets(lastBets.map((b) => ({ ...b })));
+  }, [spinning, lastBets, balance]);
+
+  const spin = useCallback(() => {
+    if (spinning || bets.length === 0) return;
+
+    // Debit total stake immediately
+    debit(totalStake);
+    setLastBets(bets.map((b) => ({ ...b })));
+
+    const result = spinRandom(); // 0..36
+    setWinningNumber(result);
+    setSpinning(true);
+  }, [spinning, bets, totalStake, debit]);
+
+  const handleSpinEnd = useCallback(() => {
+    if (winningNumber == null) return;
+
+    const { totalReturn, net } = resolveBets(bets, winningNumber);
+    if (totalReturn > 0) credit(totalReturn);
+
+    setLastNet(net);
+    setOverlay({
+      number: winningNumber,
+      color: colorOf(winningNumber),
+      net,
+      totalStake,
+    });
+
+    pushHistory({
+      number: winningNumber,
+      color: colorOf(winningNumber),
+      net,
+      stake: totalStake,
+      ts: Date.now(),
+    });
+
+    setSpinning(false);
+    setBets([]); // clear active bets after the spin resolves
+  }, [bets, winningNumber, totalStake, credit, pushHistory]);
+
+  const lastNumber = history[0]?.number ?? null;
+  const canSpin = !spinning && bets.length > 0;
+  const canRebet = !spinning && lastBets.length > 0 && lastBets.reduce((s, b) => s + b.amount, 0) <= balance;
 
   return (
     <div className="app-root">
-      <div className="bg-grid" />
-      <div className="bg-glow bg-glow-1" />
-      <div className="bg-glow bg-glow-2" />
+      <div className="bg-felt" />
+      <div className="bg-vignette" />
 
-      <div className="app-container">
-        <Header
-          rouletteType={rouletteType}
-          setRouletteType={setRouletteType}
-          spinCount={results.length}
+      <div className="app-shell">
+        <BalanceBar
+          balance={balance}
+          totalStake={totalStake}
+          lastNet={lastNet}
+          onTopUp={() => addTopUp(1000)}
+          onReset={() => {
+            if (window.confirm("Zresetować saldo do 1000 $ i wyczyścić historię?")) {
+              reset();
+              setLastBets([]);
+              setLastNet(null);
+            }
+          }}
         />
 
-        <DisclaimerBanner />
+        <main className="game-grid">
+          <section className="game-left glass-panel">
+            <RouletteWheel
+              winningNumber={winningNumber}
+              spinning={spinning}
+              onSpinEnd={handleSpinEnd}
+              lastNumber={lastNumber}
+            />
+            <HistoryStrip history={history} />
+          </section>
 
-        <InputPanel
-          inputValue={inputValue}
-          setInputValue={setInputValue}
-          onAdd={handleAddNumber}
-          onKeyDown={handleKeyDown}
-          onClear={handleClear}
-          onLoadMock={handleLoadMock}
-          results={results}
-          rouletteType={rouletteType}
-        />
+          <section className="game-center">
+            <BettingTable
+              bets={bets}
+              onPlace={placeBet}
+              onClear={clearBetAt}
+              winningNumber={!spinning && winningNumber != null ? winningNumber : null}
+              locked={spinning}
+            />
+            <ChipRack selected={chip} onSelect={setChip} />
+          </section>
 
-        {results.length > 0 && (
-          <>
-            <div className="tabs-bar">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  className={`tab-btn ${activeTab === tab.id ? "active" : ""}`}
-                  onClick={() => setActiveTab(tab.id)}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
+          <aside className="game-right glass-panel">
+            <BetSummary
+              bets={bets}
+              totalStake={totalStake}
+              onUndo={undo}
+              onClearAll={clearAll}
+              onSpin={spin}
+              onRebet={rebet}
+              canSpin={canSpin}
+              canRebet={canRebet}
+            />
+          </aside>
+        </main>
 
-            <div className="tab-content">
-              {activeTab === "stats" && <StatsGrid stats={stats} results={results} />}
-              {activeTab === "heatmap" && <HeatmapPanel stats={stats} rouletteType={rouletteType} />}
-              {activeTab === "trends" && <TrendsPanel results={results} stats={stats} />}
-              {activeTab === "bets" && <RationalBetsPanel stats={stats} rouletteType={rouletteType} />}
-              {activeTab === "education" && <EducationPanel rouletteType={rouletteType} />}
-            </div>
-          </>
-        )}
-
-        {results.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-icon">🎯</div>
-            <h3>Brak danych do analizy</h3>
-            <p>Wprowadź wyniki spinów lub załaduj przykładowe dane, aby zobaczyć statystyki.</p>
-            <button className="btn-primary" onClick={handleLoadMock}>
-              Załaduj przykładowe dane
-            </button>
-          </div>
-        )}
+        <footer className="app-foot">
+          <span>
+            Royal Roulette · gra na fikcyjne saldo (fake balance), brak prawdziwych pieniędzy.
+          </span>
+          <span>RTP 97,3% · House edge 2,7%</span>
+        </footer>
       </div>
+
+      <WinOverlay result={overlay} onClose={() => setOverlay(null)} />
     </div>
   );
 }
